@@ -1,0 +1,14 @@
+{
+  "name": "database",
+  "version": "1.0.0",
+  "description": "Common database for IDP project",
+  "main": "database.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "G.Bruce-Payne",
+  "license": "MIT",
+  "dependencies": {
+    "mysql": "^2.18.1"
+  }
+}

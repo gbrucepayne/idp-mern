@@ -1,0 +1,11 @@
+{
+  "bindings": [
+    {
+      "name": "getMoMessagesTimer",
+      "type": "timerTrigger",
+      "direction": "in",
+      "schedule": "*/10 * * * * *"
+    }
+  ],
+  "disabled": false
+}

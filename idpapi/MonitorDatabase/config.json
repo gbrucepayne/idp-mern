@@ -1,0 +1,5 @@
+{
+  "maxApiCallLogs": 65000,
+  "maxApiCallLogAgeDays": 7,
+  "messageHistoryDays": 30
+}

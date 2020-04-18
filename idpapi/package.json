@@ -1,0 +1,14 @@
+{
+  "name": "idpapi",
+  "version": "1.0.0",
+  "description": "API interface to the Inmarsat IDP service",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "G.Bruce-Payne",
+  "license": "MIT",
+  "dependencies": {
+    "isatdatapro-api": "^0.2.8"
+  }
+}
