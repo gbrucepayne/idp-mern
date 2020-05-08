@@ -1,5 +1,5 @@
 //@ts-check
-const db = require('../../database/database');
+const DbConnector = require('../../database/databaseConnector');
 
 // Mapping category:tableName
 const DATABASE_TABLES = {
@@ -9,6 +9,8 @@ const DATABASE_TABLES = {
   'messageMobileOriginated': 'raw_messages',
   'messageMobileTerminated': 'raw_messages',
   'apiCallLog': 'api_calls',
+  'messageReturn': 'uav_messages',
+  'messageForward': 'uav_messages',
 };
 // Conversions API:Database
 const COLUMN_CONVERSIONS = {
@@ -38,15 +40,22 @@ const SCHEMA_RAW_MESSAGES = {
   'TerminalWakeupPeriod': 'wakeupPeriod',
   'IsClosed': 'isClosed',
   'State': 'state',
+  'ReferenceNumber': 'referenceNumber',
 };
 const TTL_API_CALL_LOG = 7;  // days(?)
 const TTL_MESSAGE = 90;  // days(?)
-
-/**
- * Create the database if it does not exist
- */
-async function createDatabase() {
-  //TODO set up tables, create triggers and stored procedures
+/*
+async function initialize() {
+  await this.db.initialize();
+}
+*/
+function getTableSchema(tableName) {
+  switch (tableName) {
+    case 'raw_messages':
+      return SCHEMA_RAW_MESSAGES;
+    default:
+      return COLUMN_CONVERSIONS;
+  }
 }
 
 function getItemTable(itemBody) {
@@ -56,15 +65,6 @@ function getItemTable(itemBody) {
     return [tableName, schema];
   } else {
     throw new Error(`Unknown item category ${itemBody.category}`);
-  }
-}
-
-function getTableSchema(tableName) {
-  switch (tableName) {
-    case 'raw_messages':
-      return SCHEMA_RAW_MESSAGES;
-    default:
-      return COLUMN_CONVERSIONS;
   }
 }
 
@@ -105,14 +105,11 @@ function convertFromColumnNames(itemBody, schema) {
 /**
  * Create item if it does not exist (noSQL concept)
  */
-async function createItem(itemBody) {
+async function createItem(db, itemBody) {
   console.log(`createItem: ${JSON.stringify(itemBody)}`);
   let [table, schema] = getItemTable(itemBody);
   let query = `INSERT INTO ${table} SET ?`;
   let newId = -1;
-  if (itemBody.payload) {
-    itemBody.payload = JSON.stringify(itemBody.payload);
-  }
   try {
     let res = await db.query(query, convertToColumnNames(itemBody, schema));
     newId = res.insertId;
@@ -125,30 +122,9 @@ async function createItem(itemBody) {
 }
 
 /**
- * Query the container using SQL
- * Example: query = 'SELECT VALUE r.children FROM root r WHERE r.lastName = @lastName'
- * parameters = [{name: '@lastName', value: 'Andersen'}]
- */
-async function queryDb(query, parameters) {
-  let results = [];
-  try {
-    results = await db.query(query);
-  } catch (err) {
-    console.log(err);
-    throw err;
-  } finally {
-    return results;
-  }
-}
-
-async function close() {
-  await db.end();
-}
-
-/**
  * Replace the item by ID.
  */
-async function replaceItem(itemBody) {
+async function replaceItem(db, itemBody) {
   console.log(`replaceItem: ${JSON.stringify(itemBody)}`)
   let [table, schema] = getItemTable(itemBody);
   let query = `UPDATE ${table} SET ? WHERE id = ?`;
@@ -166,7 +142,7 @@ async function replaceItem(itemBody) {
 /**
  * Delete the item by ID.  TODO: broken
  */
-async function deleteItem(itemBody) {
+async function deleteItem(db, itemBody) {
   console.log(`deleteItem ${JSON.stringify(itemBody)}`);
   let [table, schema] = getItemTable(itemBody);
   let query = `DELETE FROM ${table} WHERE id = ?`;
@@ -181,29 +157,57 @@ async function deleteItem(itemBody) {
   }
 }
 
-async function initializeDatabase() {
-  await createDatabase();
+async function close() {
+  await this.db.end();
 }
 
 async function updateApiCallLogs(apiCallLog) {
-  apiCallLog.ttl = TTL_API_CALL_LOG;
-  await createItem(apiCallLog);
+  //apiCallLog.ttl = TTL_API_CALL_LOG;
+  await createItem(this.db, apiCallLog);
+}
+
+async function updateApiAlive(gatewayUrl, isAlive) {
+  const table = 'message_gateways';
+  let query = `SELECT * FROM ${table} WHERE url = "${gatewayUrl}"`;
+  let gateway = await this.db.query(query);
+  let changed = false;
+  if (gateway.length > 0) {
+    if (isAlive != gateway[0].alive) {
+      let updated = gateway[0];
+      updated.alive = isAlive;
+      updated.event_time = new Date().toISOString();
+      await replaceItem(this.db, updated);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function convertPayloads(message) {
+  let converted = {}
+  Object.assign(converted, message)
+  if (message.RawPayload) {
+    converted.RawPayload = Buffer.from(message.RawPayload);
+  }
+  if (message.Payload) {
+    converted.Payload = JSON.stringify(message.Payload);
+  }
+  return converted;
 }
 
 async function updateMobileOriginatedMessages(message) {
   const table = 'raw_messages';
+  const category = 'messageMobileOriginated';
   let schema = getTableSchema(table);
-  let query = `SELECT * FROM ${table}` +
-              ' WHERE (category = "messageMobileOriginated")' +
-              ` AND (messageId = ${message.ID})`;
-  const duplicates = await queryDb(query);
+  let query = `SELECT * FROM ${table}`
+      + ` WHERE category = "${category}"`
+      + ` AND messageId = ${message.ID}`;
+  const duplicates = await this.db.query(query);
   if (duplicates.length === 0) {
-    message.category = 'messageMobileOriginated';
+    message.category = category;
     message.ttl = TTL_MESSAGE;
-    if (message.RawPayload) {
-      message.RawPayload = Buffer.from(message.RawPayload);
-    }
-    await createItem(convertToColumnNames(message, schema));
+    let dbEntry = convertPayloads(message);
+    await createItem(this.db, convertToColumnNames(dbEntry, schema));
     return true;
   } else {
     return false;
@@ -212,35 +216,62 @@ async function updateMobileOriginatedMessages(message) {
 
 async function updateMobileTerminatedMessages(message) {
   const table = 'raw_messages';
+  const category = 'messageMobileTerminated';
   let schema = getTableSchema(table); 
   let newStatus = false;
-  let query = `SELECT * FROM ${table}` +
-              ' WHERE (category = "messageMobileTerminated")' +
-              ` AND (messageId = ${message.ForwardMessageID})`;
-  const stored = await queryDb(query);
-  if (stored.length === 0) {
-    message.category = 'messageMobileTerminated';
+  let query = `SELECT * FROM ${table}`
+      + ` WHERE category = "${category}"`
+      + ` AND messageId = ${message.ForwardMessageID}`;
+  const stored = await this.db.query(query);
+  if (stored.length === 0 && message.DestinationID) {
+    message.category = category;
     message.ttl = TTL_MESSAGE;
-    await createItem(convertToColumnNames(message, schema));
+    let dbEntry = convertPayloads(message);
+    await createItem(this.db, convertToColumnNames(dbEntry, schema));
     newStatus = true;
-  } else {
+  } else if (stored.length > 0) {
     let updated = stored[0];
-    if (updated.State && updated.State !== message.state) {
+    if (updated.state !== message.State) {
       newStatus = true;
+      if (message.State > 1) {
+        //TODO (Geoff) notify failure
+      }
+      for (let attr in message) {
+        updated[attr] = message[attr];
+      };
+      let dbEntry = convertPayloads(updated);
+      await replaceItem(this.db, convertToColumnNames(dbEntry, schema));
     }
-    for (let attr in message) { updated[attr] = message[attr] };
-    await replaceItem(convertToColumnNames(updated, schema));
+  } else {
+    // TODO: get forward message (submitted by some other process)
+    console.debug(`Retrieved status for unknown forward message submission ${message.ForwardMessageID}`);
   }
   return newStatus;
 }
 
+async function isMessageInDatabase(message) {
+  const table = 'raw_messages';
+  const category = 'messageMobileTerminated';
+  let schema = getTableSchema(table); 
+  let newStatus = false;
+  let query = `SELECT * FROM ${table}`
+      + ` WHERE category = "${category}"`
+      + ` AND messageId = ${message.ForwardMessageID}`;
+  const stored = await this.db.query(query);
+  if (stored.length === 0) {
+    return false;
+  }
+  return true;
+}
+
 async function getOpenMobileTerminatedIds(accessId) {
   const table = 'raw_messages';
+  const category = 'messageMobileTerminated';
   let messageIds = [];
   let query = `SELECT * FROM ${table}` +
-              ' WHERE (category = "messageMobileTerminated")' +
+              ` WHERE category = "${category}"` +
               ` AND accessId = "${accessId}" AND isClosed = false`;
-  const openMessages = await queryDb(query);
+  const openMessages = await this.db.query(query);
   if (openMessages.length > 0) {
     for (let m=0; m < openMessages.length; m++) {
       messageIds.push(openMessages[m].messageId);
@@ -253,17 +284,17 @@ async function getOpenMobileTerminatedIds(accessId) {
 async function updateMobileMeta(mobileMeta) {
   const table = 'mobiles';
   //console.log(`updateMobileMeta with ${JSON.stringify(mobileMeta)}`);
-  let query = `SELECT * FROM ${table}` +
-              ` WHERE mobileId = "${mobileMeta.mobileId}"`;
-  const mobile = await queryDb(query);
+  let query = `SELECT * FROM ${table}`
+      + ` WHERE mobileId = "${mobileMeta.mobileId}"`;
+  const mobile = await this.db.query(query);
   if (mobile.length > 0) {
     let meta = mobile[0];
     for (let attr in mobileMeta) {
       meta[attr] = mobileMeta[attr];
     }
-    await replaceItem(meta);
+    await replaceItem(this.db, meta);
   } else {
-    await createItem(mobileMeta);
+    await createItem(this.db, mobileMeta);
   }
 }
 
@@ -274,11 +305,11 @@ async function maintainApiCallLogs(maxRecords) {
   const table = 'api_calls';
   let query = `SELECT * FROM ${table}` +
               ' ORDER BY _ts ASC';
-  const apiCallLogs = await queryDb(query);
+  const apiCallLogs = await this.db.query(query);
   if (apiCallLogs.length > maxRecords) {
     let recordsToDelete = apiCallLogs.length - maxRecords;
     for (let r=0; r < recordsToDelete; r++) {
-      await deleteItem(apiCallLogs[r]);
+      await deleteItem(this.db, apiCallLogs[r]);
     }
     console.log(`Database maintenance deleted ${recordsToDelete} apiCallLogs`);
   }
@@ -291,8 +322,8 @@ async function maintainApiCallLogs(maxRecords) {
 async function getMailboxes() {
   const table = 'mailboxes';
   let schema = getTableSchema(table);
-  let query = `SELECT * FROM ${table}`;
-  let mailboxes = await queryDb(query);
+  let query = `SELECT * FROM ${table} WHERE enabled = true`;
+  let mailboxes = await this.db.query(query);
   for (let m=0; m < mailboxes.length; m++) {
     mailboxes[m] = convertFromColumnNames(mailboxes[m], schema);
   }
@@ -303,7 +334,7 @@ async function getMailboxGateway(mailbox) {
   const table = 'message_gateways';
   let gatewayName = mailbox.messageGatewayName;
   let query = `SELECT * FROM ${table} WHERE name = "${gatewayName}"`;
-  let gateways = await queryDb(query);
+  let gateways = await this.db.query(query);
   if (gateways.length > 0) {
     return gateways[0].url;
   } else {
@@ -321,14 +352,14 @@ async function getMobileMailbox(mobileId) {
   let mobilesSchema = getTableSchema(mobilesTable);
   let mailboxesSchema = getTableSchema(mailboxesTable);
   const mQuery = `SELECT * FROM ${mobilesTable} WHERE mobileId = "${mobileId}"`;
-  const mQueryResult = await queryDb(mQuery);
+  const mQueryResult = await this.db.query(mQuery);
   if (mQueryResult.length > 0) {
     let mDetail = convertFromColumnNames(mQueryResult[0], mobilesSchema);
     if (typeof(mDetail.accessId) === 'string') {
       let accessId = mDetail.accessId;
       let mbQuery = `SELECT * FROM ${mailboxesTable}` +
                     ` WHERE accessId = "${accessId}"`;
-      const mbQueryResult = await queryDb(mbQuery);
+      const mbQueryResult = await this.db.query(mbQuery);
       if (mbQueryResult.length > 0) {
         let mbDetail = convertFromColumnNames(mbQueryResult[0], mailboxesSchema);
         return mbDetail;
@@ -365,76 +396,135 @@ async function getApiFilter(mailbox, queryType) {
   }
   let filter = {};
   let query = `SELECT * FROM ${table}`
-              + ` WHERE accessId = "${mailbox.accessId}"`
-              + ` AND operation = "${queryType}"`
-              + ' ORDER BY _ts DESC'
-              + ' LIMIT 1';
-  const queryResult = await queryDb(query);
+      + ` WHERE accessId = "${mailbox.accessId}"`
+      + ` AND operation = "${queryType}"`
+      + ' ORDER BY _ts DESC'
+      + ' LIMIT 1';
+  const queryResult = await this.db.query(query);
   if (queryResult.length > 0) {
     let lastApiCall = queryResult[0];
     if (lastApiCall.nextStartId && lastApiCall.nextStartId > 0) {
       filter.startMessageId = lastApiCall.nextStartId;
-      console.log(`Found NextStartID ${filter.startMessageId}`
-                + ` from prior API call as filter`);
-    } else if (lastApiCall.nextStartUtc !== '' && lastApiCall.nextStartUtc !== null) {
+      console.debug(`Found NextStartID ${filter.startMessageId}`
+                + ` for mailbox ${mailbox.accessId} as filter`);
+    } else if (lastApiCall.nextStartUtc !== ''
+        && lastApiCall.nextStartUtc !== null) {
       filter.startTimeUtc = lastApiCall.nextStartUtc.replace(' ', 'T') + 'Z';
       console.log(`Found NextStartUTC ${filter.startTimeUtc}`
-                + ` from prior API call as filter`);
+                + ` for mailbox ${mailbox.accessId} as filter`);
     }
   }
   if (typeof(filter.startTimeUtc) !== 'string') {
     let date = new Date();
     date.setUTCHours(date.getUTCHours() - 48);
     filter.startTimeUtc = date.toISOString();
-    console.log(`No previous apiCallLog found - filter time ${filter.startTimeUtc}`);
+    console.debug(`No previous ${queryType} apiCallLog found for ${mailbox.accessId} - filter time`
+        + ` ${filter.startTimeUtc}`);
   }
   return filter;
 }
 
-/**
- * Returns the credentials and filter criteria for message retrieval
- * @param {Object} mailbox The mailbox object
- * @returns {Promise<Object>} filter
- */
-async function getMobileOriginatedQuery(mailbox) {
-  const table = 'api_calls';
-  let auth = {
-    accessId: mailbox.accessId,
-    password: mailbox.password
-  };
-  let filter = {};
+// ************************* UAV POC ONLY **************************
+async function updateUavMeta(mobileMeta) {
+  const table = 'uav_mobiles';
+  //console.log(`updateMobileMeta with ${JSON.stringify(mobileMeta)}`);
   let query = `SELECT * FROM ${table}`
-              + ` WHERE accessId = "${mailbox.accessId}"`
-              + ' AND operation = "get_return_messages"'
-              + ' ORDER BY _ts DESC'
-              + ' LIMIT 1';
-  const queryResult = await queryDb(query);
-  if (queryResult.length > 0) {
-    let lastApiCall = queryResult[0];
-    if (!isNaN(lastApiCall.nextStartId) && lastApiCall.nextStartId !== -1) {
-      filter.startMessageId = lastApiCall.nextStartId;
-      console.log(`Found NextStartID ${filter.startMessageId}`
-                + ` from prior API call as filter`);
-    } else if (lastApiCall.nextStartUtc !== '') {
-      filter.startTimeUtc = lastApiCall.nextStartUtc;
-      console.log(`Found NextStartUTC ${filter.startTimeUtc}`
-                + ` from prior API call as filter`);
+      + ` WHERE mobileId = "${mobileMeta.mobileId}"`;
+  const mobile = await this.db.query(query);
+  if (mobile.length > 0) {
+    let meta = mobile[0];
+    for (let attr in mobileMeta) {
+      meta[attr] = mobileMeta[attr];
     }
+    await replaceItem(this.db, meta);
+  } else {
+    await createItem(this.db, mobileMeta);
   }
-  if (typeof(filter.startTimeUtc) !== 'string') {
-    let date = new Date();
-    date.setUTCHours(date.getUTCHours() - 48);
-    filter.startTimeUtc = date.toISOString();
-    console.log(`No previous apiCallLog found - filter time ${filter.startTimeUtc}`);
-  }
-  return filter;
 }
 
+async function updateUavReturnMessages(message) {
+  const table = 'uav_messages';
+  const category = 'messageReturn';
+  let schema = getTableSchema(table);
+  let query = `SELECT * FROM ${table}`
+      + ` WHERE category = "${category}"`
+      + ` AND messageId = ${message.messageId}`;
+  const duplicates = await this.db.query(query);
+  if (duplicates.length === 0) {
+    message.category = category;
+    message.ttl = TTL_MESSAGE;
+    let dbEntry = convertPayloads(message);
+    await createItem(this.db, convertToColumnNames(dbEntry, schema));
+    return true;
+  } else {
+    return false;
+  }
+}
+
+async function updateUavForwardMessages(message) {
+  const table = 'uav_messages';
+  const category = 'messageForward';
+  let schema = getTableSchema(table); 
+  let newStatus = false;
+  let query = `SELECT * FROM ${table}`
+  + ` WHERE category = "${category}"`
+  + ` AND messageId = ${message.ForwardMessageID}`;
+  const stored = await this.db.query(query);
+  if (message.serviceIdNumber && message.serviceIdNumber === 128) {
+    message.category = category;
+    message.ttl = TTL_MESSAGE;
+    let dbEntry = convertPayloads(message);
+    await createItem(this.db, convertToColumnNames(dbEntry, schema));
+    newStatus = true;
+  } else if (stored.length > 0) {
+    let updated = stored[0];
+    if (updated.state && updated.state !== message.state) {
+      newStatus = true;
+      if (message.state === '') {
+        //let latency = 
+      }
+    }
+    for (let attr in message) {
+      updated[attr] = message[attr];
+    };
+    let dbEntry = convertPayloads(message);
+    await replaceItem(this.db, convertToColumnNames(dbEntry, schema));
+  }
+  return newStatus;
+}
+
+// *****************************************************************
+
+function DataHandler(name) {
+  this.name = name;
+  this.db = new DbConnector();
+}
+DataHandler.prototype.initialize = async function() {
+  await this.db.initialize();
+}
+DataHandler.prototype.getMailboxes = getMailboxes;
+DataHandler.prototype.getApiFilter = getApiFilter;
+DataHandler.prototype.updateMobileMeta = updateMobileMeta;
+DataHandler.prototype.updateMobileOriginatedMessages = updateMobileOriginatedMessages;
+DataHandler.prototype.isMessageInDatabase = isMessageInDatabase;
+DataHandler.prototype.updateMobileTerminatedMessages = updateMobileTerminatedMessages;
+DataHandler.prototype.getOpenMobileTerminatedIds = getOpenMobileTerminatedIds;
+DataHandler.prototype.getMobileMailbox = getMobileMailbox;
+DataHandler.prototype.updateApiCallLogs = updateApiCallLogs;
+DataHandler.prototype.maintainApiCallLogs = maintainApiCallLogs;
+DataHandler.prototype.getMailboxGateway = getMailboxGateway;
+DataHandler.prototype.updateApiAlive = updateApiAlive;
+DataHandler.prototype.close = close;
+DataHandler.prototype.updateUavMeta = updateUavMeta;
+DataHandler.prototype.updateUavReturnMessages = updateUavReturnMessages;
+DataHandler.prototype.updateUavForwardMessages = updateUavForwardMessages;
+
+module.exports = DataHandler;
+/*
 module.exports = {
-  initializeDatabase,
+  initialize,
   getMailboxes,
   getApiFilter,
-  getMobileOriginatedQuery,
   updateMobileMeta,
   updateMobileOriginatedMessages,
   updateMobileTerminatedMessages,
@@ -445,4 +535,9 @@ module.exports = {
   getMailboxGateway,
   close,
   createItem,   //TODO: REMOVE
+  // *** UAV only
+  updateUavMeta,
+  updateUavReturnMessages,
+  updateUavForwardMessages,
 }
+// */

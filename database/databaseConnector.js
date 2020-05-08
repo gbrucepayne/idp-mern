@@ -5,7 +5,7 @@ const mysql = require('mysql');
 const util = require('util');
 
 const dbConfig = require('./config/local');
-
+/*
 const conn = mysql.createConnection({
   host: dbConfig.host,
   user: dbConfig.user,
@@ -15,27 +15,53 @@ const conn = mysql.createConnection({
 const connect = util.promisify(conn.connect).bind(conn);
 const query = util.promisify(conn.query).bind(conn);
 const end = util.promisify(conn.end).bind(conn);
+// */
 
-const CATEGORIES = {
-  api_call: {
-    getMobileOriginated: 'get_return_messages',
-    sendMobileTerminated: 'submit_messages',
-    getMobileTerminatedStatus: 'get_forward_statuses',
-    cancelMobileTerminated: 'submit_cancelations',
-  },
-  api_gateway: 'api_gateway',
-  mailbox: 'mailbox',
-  mobile: 'mobile',
-  message: {
-    return: 'mobile_originated',
-    forward: 'mobile_terminated',
-  },
-};
+/**
+ * DbConnection class
+ * @constructor
+ */
+function DbConnection() {
+  this.type = 'MySQL';
+  this.conn = mysql.createConnection({
+    host: dbConfig.host,
+    user: dbConfig.user,
+    password: dbConfig.password,
+  });
+  this.connect = util.promisify(this.conn.connect).bind(this.conn);
+  this.query = util.promisify(this.conn.query).bind(this.conn);
+  this.end = util.promisify(this.conn.end).bind(this.conn);
+}
+  
+DbConnection.prototype.initialize = async function() {
+  let exists = await this.query(`SHOW DATABASES LIKE "${dbConfig.database}"`);
+  if (exists.length === 0) {
+    await this.query(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database}`);
+    console.log(`Created database ${dbConfig.database}`);
+    await this.query(`USE ${dbConfig.database}`);
+    for (let tableName in SCHEMA) {
+      if (SCHEMA.hasOwnProperty(tableName)) {
+        let tQuery = `CREATE TABLE IF NOT EXISTS ${tableName}(`;
+        const table = SCHEMA[tableName];
+        for (let column=0; column < table.length; column++) {
+          if (column > 0) tQuery += ', ';
+          tQuery += table[column];
+        }
+        tQuery += ')';
+        await this.query(tQuery);
+        console.log(`Created table ${tableName}`);
+      }
+    }
+  } else {
+    await this.query(`USE ${dbConfig.database}`);
+    console.log(`Database ${dbConfig.database} exists`);
+  }
+}
 
+// Maps IDP API property : database column name
 const API_MAP = {
-  // Native API : database column
   getMobileOriginatedMessages: {
-    'table': 'api_call',
+    'category': 'api_call',
     'operation': 'get_return_messages',
     'ErrorID': 'error_id',
     'NextStartUTC': 'next_start_utc',
@@ -43,7 +69,7 @@ const API_MAP = {
     'More': 'more',
   },
   MessageMobileOriginated: {
-    'table': 'message_return',
+    'category': 'message_mobile_originated',
     'ID': 'message_id',
     'MessageUTC': 'mailbox_receive_time',
     'ReceiveUTC': 'satellite_receive_time',
@@ -57,17 +83,22 @@ const API_MAP = {
     'Payload': 'payload_json',
   },
   submitMobileTerminatedMessages: {
-    'table': 'api_call',
+    'category': 'api_call',
     'operation': 'submit_messages',
     'ErrorID': 'error_id',
   },
+  submitMobileTerminatedCancelations: {
+    'category': 'api_call',
+    'operation': 'submit_cancelations',
+    'ErrorID': 'error_id',
+  },
   getMobileTerminatedMessages: {
-    'table': 'api_call',
+    'category': 'api_call',
     'operation': 'get_forward_messages',
     'ErrorID': 'error_id',
   },
   getMobileTerminatedStatuses: {
-    'table': 'api_call',
+    'category': 'api_call',
     'operation': 'get_forward_statuses',
     'ErrorID': 'error_id',
     'NextStartUTC': 'next_start_utc',
@@ -75,7 +106,7 @@ const API_MAP = {
   },
   // MessageMobileTerminated applies to forward messages and statuses
   MessageMobileTerminated: {
-    'table': 'message_forward',
+    'category': 'message_mobile_terminated',
     'DestinationID': 'mobile_id',
     'ForwardMessageID': 'message_id',
     'OTAMessageSize': 'size',
@@ -100,22 +131,26 @@ const API_MAP = {
     'Payload': 'payload_json',
   },
   getMobileInfo: {
+    'category': 'mobile',
     'ID': 'id',
     'Description': 'description',
     'LastRegistrationUTC': 'last_registration_time',
     'RegionName': 'satellite_region',
   },
+  /*
   getBroadcastInfo: {
+    'category': 'broadcast_group',
     'ID': 'id',
     'Description': 'description',
   },
+  */
 };
 
+// Defines MySQL schema based on IDP API property map
 const SCHEMA = {
   api_call: [
     'id INT NOT NULL AUTO_INCREMENT, PRIMARY KEY(id)',
-    '_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
-    'category VARCHAR(25) DEFAULT NULL',
+    'category VARCHAR(25) DEFAULT "api_call"',
     'operation VARCHAR(45) NOT NULL',
     'success BOOLEAN NOT NULL',
     'call_time VARCHAR(45) NOT NULL',
@@ -128,11 +163,13 @@ const SCHEMA = {
     'next_start_utc VARCHAR(25) DEFAULT NULL',
     'high_watermark VARCHAR(25) DEFAULT NULL',
     'message_count INT DEFAULT 0',
-    'ttl INT DEFAULT NULL',
+    // _ts timestamp and ttl time to live to align with CosmosDB
+    '_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
+    `ttl INT DEFAULT ${dbConfig.apiCallLogTimeToLive}`,
   ],
   api_gateway: [
     'id INT NOT NULL AUTO_INCREMENT, PRIMARY KEY(id)',
-    'category VARCHAR(25) DEFAULT NULL',
+    'category VARCHAR(25) DEFAULT "api_gateway"',
     'name VARCHAR(25) NOT NULL',
     'url VARCHAR(100) NOT NULL',
   ],
@@ -165,12 +202,23 @@ const SCHEMA = {
     'asset_type VARCHAR(50) DEFAULT NULL',
     'location JSON DEFAULT NULL',
   ],
-  message_return: [
+  /*
+  broadcast_group: [
+    // Use Broadcast ID as primary key as globally unique
+    'id VARCHAR(15) NOT NULL, PRIMARY KEY(id)',
+    'category VARCHAR(25) DEFAULT "broadcast_group"',
+    'description VARCHAR(50) DEFAULT ""',
+    'mailbox_id VARCHAR(25) NOT NULL',
+    'beam_mask INT DEFAULT NULL',
+    'retransmit_count TINYINT DEFAULT NULL',
+  ],
+  */
+  message_mobile_originated: [
     // id not using gateway assigned messaging id due to possible overlap
     'id INT NOT NULL AUTO_INCREMENT, PRIMARY KEY(id)',
     'category VARCHAR(25) DEFAULT "message_mobile_originated"',
     'mobile_id VARCHAR(15) NOT NULL',
-    'message_id INT UNSIGNED NOT NULL',
+    'message_id BIGINT UNSIGNED NOT NULL',
     `${API_MAP.MessageMobileOriginated['MessageUTC']} TIMESTAMP DEFAULT NULL`,
     `${API_MAP.MessageMobileOriginated['ReceiveUTC']} TIMESTAMP DEFAULT NULL`,
     `${API_MAP.MessageMobileOriginated['SIN']} TINYINT UNSIGNED NOT NULL`,
@@ -180,13 +228,16 @@ const SCHEMA = {
     `${API_MAP.MessageMobileOriginated['RawPayload']} BLOB DEFAULT NULL`,
     `${API_MAP.MessageMobileOriginated['Payload']} JSON DEFAULT NULL`,
     `${API_MAP.MessageMobileOriginated['Name']} VARCHAR(50) DEFAULT NULL`,
+    // Time to live compatible with Cosmos DB
+    `ttl INT DEFAULT ${dbConfig.messageTimeToLive}`,
+
   ],
-  message_forward: [
+  message_mobile_terminated: [
     'id INT NOT NULL AUTO_INCREMENT, PRIMARY KEY(id)',
     'category VARCHAR(25) DEFAULT "message_mobile_terminated"',
     'mobile_id VARCHAR(15) NOT NULL',
-    'message_id INT UNSIGNED NOT NULL',
-    `${API_MAP.MessageMobileTerminated['UserMessageID']} INT DEFAULT NULL`,
+    'message_id BIGINT UNSIGNED NOT NULL',
+    `${API_MAP.MessageMobileTerminated['UserMessageID']} BIGINT DEFAULT NULL`,
     `size SMALLINT UNSIGNED DEFAULT NULL`,
     'submit_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
     'error_id SMALLINT UNSIGNED DEFAULT NULL',
@@ -201,9 +252,14 @@ const SCHEMA = {
     `${API_MAP.MessageMobileTerminated['SIN']} TINYINT UNSIGNED NOT NULL`,
     `${API_MAP.MessageMobileTerminated['MIN']} TINYINT UNSIGNED DEFAULT NULL`,
     `${API_MAP.MessageMobileTerminated['Name']} VARCHAR(50) DEFAULT NULL`,
+    // Time to live compatible with Cosmos DB
+    `ttl INT DEFAULT ${dbConfig.messageTimeToLive}`,
   ],
 };
 
+/**
+ * Creates the database if it does not exist
+ */
 async function initialize() {
   let exists = await query(`SHOW DATABASES LIKE "${dbConfig.database}"`);
   if (exists.length === 0) {
@@ -224,21 +280,54 @@ async function initialize() {
       }
     }
   } else {
+    await query(`USE ${dbConfig.database}`);
     console.log(`Database ${dbConfig.database} exists`);
   }
 }
 
-///* COMMENT OUT FOR TEST ONLY
+/**
+ * Returns a dictionary of API property mappings based on item category
+ * @param {Object} item The item to be mapped
+ * @returns {Object} A dictionary map of API property name to db column name
+ */
+function getApiMap(item) {
+  if (!item.category) throw new Error('Missing item.category for API map');
+  for (let itemType in API_MAP) {
+    if (API_MAP.hasOwnProperty(itemType)) {
+      if (API_MAP[itemType]['category'] === item.category) {
+        return API_MAP[itemType];
+      }
+    }
+  }
+}
+
+function getTableSchema(item) {
+  if (!item.category) throw new Error('Missing item.category for Table lookup');
+  for (let tableName in SCHEMA) {
+    if (SCHEMA.hasOwnProperty(tableName)) {
+      if (tableName === item.category) return [tableName, getApiMap(item)];
+    }
+  }
+}
+
+/* COMMENT OUT FOR TEST ONLY
+console.log('WARNING: DATABASE CREATION TEST MODE');
+//const db = new DbConnection();
 async function test() {
-  await initialize();
-  await end();
+  //await db.initialize();
+  //await db.end();
 }
 test();
 // */
 
+module.exports = DbConnection;
+
+/*
 module.exports = {
-  initialize,
   connect,
   query,
   end,
+  initialize,
+  getTableSchema,
 };
+// */

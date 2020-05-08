@@ -1,15 +1,19 @@
 const idpApi = require('isatdatapro-api');
 //const idpApi = require('../../isatdatapro-api/lib/api-v1');
 const codec = require('../codec/modemMessageParser');
+const DataHandler = require('../database/dataHandler');
 
 module.exports = async function (context, req) {
-  const database = require('../database/database');
-  context.log(`SendMobileTerminatedMessages triggered by HTTP request`);
-  await database.initializeDatabase();
+  const thisFunction = {name: 'SendMobileTerminatedMessages'};
+  context.log(`${thisFunction.name} triggered by HTTP request`);
+  const database = new DataHandler();
+  await database.initialize();
+  let apiOutageCatch = '';
 
   async function sendMessage(message) {
     const mailbox = await database.getMobileMailbox(message.DestinationID);
     let idpGateway = await database.getMailboxGateway(mailbox);
+    apiOutageCatch = idpGateway;
     const auth = {
       accessId: mailbox.accessId,
       password: mailbox.password
@@ -25,6 +29,11 @@ module.exports = async function (context, req) {
     };
     await Promise.resolve(idpApi.submitMobileTerminatedMessages(auth, [message], idpGateway))
     .then(async function (result) {
+      let apiRecovered = await database.updateApiAlive(idpGateway, true);
+      if (apiRecovered) {
+        context.log(`API recovered for ${idpGateway}`);
+        // TODO notify recovery
+      }
       context.log(`submitMT result: ${JSON.stringify(result)}`);
       apiCallLog.errorId = result.ErrorID;
       if (result.ErrorID !== 0) {
@@ -43,15 +52,29 @@ module.exports = async function (context, req) {
               apiCallLog.success = false;
               apiCallLog.errorDesc = errorDesc;
             } else {
-              context.log(`Message ID ${submission.ForwardMessageID} assigned`);
+              //context.log(`Message ID ${submission.ForwardMessageID} assigned`);
               forwardId = submission.ForwardMessageID;
+              let serviceIdNumber;
+              if (message.Payload) {
+                serviceIdNumber = message.Payload.SIN;
+              } else {
+                serviceIdNumber = message.RawPayload[0];
+              }
+              submission.serviceIdNumber = serviceIdNumber;
               let d = new Date();
               // Apply a "submitted to gateway" timestamp
               submission.MessageUTC = idpApi.dateToIdpTime(d);
               submission.accessId = auth.accessId;
+              submission.State = 0;
+              submission.stateDesc = idpApi.getMtStateDef(submission.State);
               //Starting state IsClosed flag clear for subsequent MT status check
               submission.IsClosed = false;
               await database.updateMobileTerminatedMessages(submission);
+              // ******************** UAV ONLY ***********************************
+              if (serviceIdNumber === 128) {
+                await database.updateUavForwardMessages(submission);
+              }
+              // *****************************************************************
             }
             let mobileMeta = {
               mobileId: message.DestinationID,
@@ -117,8 +140,20 @@ module.exports = async function (context, req) {
       */
     }
   } catch (err) {
-    context.log(err);
-    throw err;
+    switch(err.message) {
+      case 'HTTP 502':
+        let newOutage = await database.updateApiAlive(apiOutageCatch, false);
+        if (newOutage) {
+          context.warn(`${thisFunction.name}: API server error for ${apiOutageCatch}`);
+          // TODO: notify
+        } else {
+          context.warn(`${thisFunction.name}:API still down at ${apiOutageCatch}`);
+        }
+        break;
+      default:
+        context.error(err);
+        throw err;
+    }
   } finally {
     await database.close();
   }

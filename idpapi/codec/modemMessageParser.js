@@ -1,6 +1,6 @@
-const database = require('../database/database');
+const DataHandler = require('../database/dataHandler');
 
-'use strict';
+//'use strict';
 
 /**
  * Rounds a number to a certain decimal precision
@@ -127,7 +127,7 @@ function getData(dataField) {
  * @param {MessageMetadata} meta Metadata including mobileId, timestamp, [topic]
  * @returns {Object} notification message
  */
-function parseModemRegistration(message, meta) {
+async function parseModemRegistration(message, meta) {
   let mobileMeta = {
     mobileId: meta.mobileId,
   };
@@ -153,28 +153,28 @@ function parseModemRegistration(message, meta) {
         break;
       case 'wakeupPeriod':
         mobileMeta.wakeupPeriod = fields[f].Value;
-        notifyMessage.wakeupPeriod = fields[f].Value;
+        tmp.wakeupPeriod = fields[f].Value;
         break;
       case 'lastResetReason':
-        notifyMessage.lastResetReason = fields[f].Value;
+        tmp.lastResetReason = fields[f].Value;
         break;
       case 'virtualCarrier':
-        notifyMessage.vcId = fields[f].Value;
+        tmp.vcId = fields[f].Value;
         break;
       case 'beam':
-        notifyMessage.beamId = fields[f].Value;
+        tmp.beamId = fields[f].Value;
         break;
       case 'vain':
-        notifyMessage.vain = fields[f].Value;
+        tmp.vain = fields[f].Value;
         break;
       case 'operatorTxState':
-        notifyMessage.operatorTxState = fields[f].Value;
+        tmp.operatorTxState = fields[f].Value;
         break;
       case 'userTxState':
-        notifyMessage.userTxState = fields[f].Value;
+        tmp.userTxState = fields[f].Value;
         break;
       case 'broadcastIDCount':
-        notifyMessage.bcIdCount = fields[f].Value;
+        tmp.bcIdCount = fields[f].Value;
         break;
       default:
         console.warn(` Unknown field: ${fields[f].Name}`);
@@ -184,12 +184,15 @@ function parseModemRegistration(message, meta) {
   if (tmp.hwMajorVersion) {
     var hwVersion = tmp.hwMajorVersion.toString() + '.' + tmp.hwMinorVersion.toString();
     var swVersion = tmp.swMajorVersion.toString() + '.' + tmp.swMinorVersion.toString();
-    vlog(logLevels.DEBUG, fName + ' found HW version:' + hwVersion + ' | SW version:' + swVersion);
+    console.log(' found HW version:' + hwVersion + ' | SW version:' + swVersion);
     mobileMeta.modemHwVersion = hwVersion;
     mobileMeta.modemSwVersion = swVersion;
     mobileMeta.modemProductId = tmp.productId;
   }
-  database.updateMobileMeta(mobileMeta);
+  const database = new DataHandler();
+  await database.initialize();
+  await database.updateMobileMeta(mobileMeta);
+  await database.close();
   return notification(mobileMeta, message.Name);
 }
 
@@ -205,7 +208,7 @@ function parseModemProtocolError(message, meta) {
   const fields = message.Fields;
   let notifyMessage = notification(mobileMeta, message.Name);
   for (let f = 0; f < fields.length; f++) {
-    vlog(logLevels.DEBUG, fName + ' Field Name: ' + fields[f].Name + ' | Field Value: ' + fields[f].Value);
+    console.log(' Field Name: ' + fields[f].Name + ' | Field Value: ' + fields[f].Value);
     switch (fields[f].Name) {
       case 'messageReference':
         notifyMessage.msgRef = fields[f].Value;
@@ -295,12 +298,12 @@ function getWakeupSeconds(wakeupCode) {
  * @param {MessageMetadata} meta Metadata including mobileId, timestamp, [topic]
  * @returns {Object} notification message
  */
-function parseModemSleepSchedule(message, meta) {
+async function parseModemSleepSchedule(message, meta) {
   let mobileMeta = { mobileId: meta.mobileId };
   const fields = message.Fields;
   let notifyMessage = notification(mobileMeta, message.Name);
   for (let f = 0; f < fields.length; f++) {
-    vlog(logLevels.DEBUG, fName + ' Field Name: ' + fields[f].Name + ' | Field Value: ' + fields[f].Value);
+    console.log(' Field Name: ' + fields[f].Name + ' | Field Value: ' + fields[f].Value);
     switch (fields[f].Name) {
       case 'wakeupPeriod':
         mobileMeta.wakeupPeriod = fields[f].Value.toString();
@@ -316,7 +319,10 @@ function parseModemSleepSchedule(message, meta) {
         console.warn(`Unknown field: ${fields[f].Name}`);
     }
   }
-  database.updateMobileMeta(mobileMeta);
+  const database = new DataHandler();
+  await database.initialize();
+  await database.updateMobileMeta(mobileMeta);
+  await database.close();
   return notifyMessage;
 }
 
@@ -327,7 +333,7 @@ function parseModemSleepSchedule(message, meta) {
  * @param {MessageMetadata} meta Metadata including mobileId, timestamp, [topic]
  * @returns {Object} notification message
  */
-function parseModemLocation(message, meta) {
+async function parseModemLocation(message, meta) {
   let mobileMeta = { mobileId: meta.mobileId };
   let tmp = {};
   const fields = message.Fields;
@@ -368,7 +374,10 @@ function parseModemLocation(message, meta) {
     mobileMeta.locTimestamp = timestampFromMinuteDay(
       year, month, tmp.dayUtc, tmp.minuteOfDayUtc);
   }
-  database.updateMobileMeta(mobileMeta);
+  const database = new DataHandler();
+  await database.initialize();
+  await database.updateMobileMeta(mobileMeta);
+  await database.close();
   return notification(mobileMeta, message.Name);
 }
 
@@ -643,14 +652,14 @@ function pingTime(timestamp) {
  * @returns {Object} notification message
  */
 function parseModemPingReply(message, meta) {
-  let mobileMeta = { mobileId: msgMeta.mobileId };
+  let mobileMeta = { mobileId: meta.mobileId };
   let latency = {};
   let requestTime, responseTime;
   let notifyMessage = notification(mobileMeta, message.Name);
-  const receiveTime = pingTime(meta.timestamp);
+  let receiveTime = pingTime(meta.timestamp);
   const fields = message.Fields;
   for (let f = 0; f < fields.length; f++) {
-    vlog(logLevels.DEBUG, fName + ' Field Name: ' + fields[f].Name + ' | Field Value: ' + fields[f].Value);
+    console.log(' Field Name: ' + fields[f].Name + ' | Field Value: ' + fields[f].Value);
     switch (fields[f].Name) {
       case 'requestTime':
         requestTime = Number(fields[f].Value);
@@ -716,7 +725,7 @@ function parseNetworkPingRequest(message, meta) {
  * @param {MessageMetadata} meta Metadata including mobileId, timestamp, [topic]
  * @returns {Object} notification message
  */
-function parseModemBroadcastIds(message, meta) {
+async function parseModemBroadcastIds(message, meta) {
   let mobileMeta = { mobileId: meta.mobileId };
   const fields = message.Fields;
   let broadcastIds = [];
@@ -735,7 +744,10 @@ function parseModemBroadcastIds(message, meta) {
   }
   console.log(`BroadcastIds: ${broadcastIds}`);
   mobileMeta.broadcastIds = JSON.stringify(broadcastIds);
-  database.updateMobileMeta(mobileMeta);
+  const database = new DataHandler();
+  await database.initialize();
+  await database.updateMobileMeta(mobileMeta);
+  await database.close();
   return notification(mobileMeta, message.Name);
 }
 
@@ -783,7 +795,7 @@ function encodeModemReset(resetType) {
       resetType = 3;
       break;
     default:
-      vlog(logLevels.ERROR, fName + ' invalid resetType ' + resetType);
+      console.log(' invalid resetType ' + resetType);
       resetType = 0;
   }
   let field = {
@@ -841,15 +853,48 @@ function encodeModemGetConfiguration() {
 }
 
 function encodeModemGetLastRxInfo() {
-  console.warn('Feature not implemented');
+  console.warn('Feature not tested');
+  const payload = {
+    IsForward: true,
+    Name: 'getLastRxInfo',
+    SIN: 0,
+    MIN: 98,
+    Fields: []
+  };
+  //const rawPayload = [0, 98];
+  return payload;
 }
 
 function encodeModemGetRxMetrics(metricsPeriod) {
-  console.warn('Feature not implemented');
+  console.warn('Feature not tested');
+  const payload = {
+    IsForward: true,
+    Name: 'getRxMetrics',
+    SIN: 0,
+    MIN: 99,
+    Fields: [
+      { "Name": "Reserved", "Value": 0 },
+      { "Name": "MetricsPeriod", "Value": metricsPeriod },
+    ]
+  };
+  //const rawPayload = [0, 99, 2];
+  return payload;
 }
 
 function encodeModemGetTxMetrics(metricsPeriod) {
-  console.warn('Feature not implemented');
+  console.warn('Feature not tested');
+  const payload = {
+    IsForward: true,
+    Name: 'getTxMetrics',
+    SIN: 0,
+    MIN: 100,
+    Fields: [
+      { "Name": "Reserved", "Value": 0 },
+      { "Name": "MetricsPeriod", "Value": metricsPeriod },
+    ]
+  };
+  //const rawPayload = [0, 100, 2];
+  return payload;
 }
 
 /**

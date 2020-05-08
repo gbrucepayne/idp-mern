@@ -9,6 +9,6 @@
   "author": "G.Bruce-Payne",
   "license": "MIT",
   "dependencies": {
-    "isatdatapro-api": "^0.2.8"
+    "isatdatapro-api": "^0.2.10"
   }
 }

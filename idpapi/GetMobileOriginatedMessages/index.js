@@ -1,9 +1,11 @@
 // GetMobileOriginatedMessages
+'use strict';
 
 const idpApi = require('isatdatapro-api');
 const codec = require('../codec/modemMessageParser');
+const uav = require('../codec/uavPoc');
 //const idpApi = require('../../isatdatapro-api/lib/api-v1');
-//const database = require('../database/database');
+const DataHandler = require('../database/dataHandler');
 
 /**
  * Fetches new mobile-originated messages, stores by unique ID and maintains
@@ -12,9 +14,11 @@ const codec = require('../codec/modemMessageParser');
  * @param {object} timer
  */
 module.exports = async function (context, timer) {
+  const thisFunction = {name: 'GetMobileOriginatedMessages'};
   const callTime = new Date().toISOString();
-  const database = require('../database/database');
-  await database.initializeDatabase();
+  const database = new DataHandler();
+  await database.initialize();
+  let apiOutageCatch = '';
 
   /**
    * Retreives Mobile-Originated messages and stores unique ones in a database
@@ -26,6 +30,7 @@ module.exports = async function (context, timer) {
     const nativeApiCall = 'get_return_messages';
     // TODO (Geoff) add function to idpApi to return the native Inmarsat call
     const idpGateway = await database.getMailboxGateway(mailbox);
+    apiOutageCatch = idpGateway;
     const auth = {
       accessId: mailbox.accessId,
       password: mailbox.password,
@@ -46,6 +51,11 @@ module.exports = async function (context, timer) {
     //console.log(`Get MO messages with ${JSON.stringify(filter)}`);
     await Promise.resolve(idpApi.getMobileOriginatedMessages(auth, filter, idpGateway))
     .then(async function (result) {
+      let apiRecovered = await database.updateApiAlive(idpGateway, true);
+      if (apiRecovered) {
+        context.log(`${thisFunction.name}: API recovered for ${idpGateway}`);
+        // TODO notify recovery
+      }
       apiCallLog.errorId = result.ErrorID;
       if (result.ErrorID !== 0) {
         let errorDesc = await idpApi.getErrorName(result.ErrorID);
@@ -85,9 +95,14 @@ module.exports = async function (context, timer) {
                 let notifyMessage = codec.parseCoreModem(message);
                 context.log(`NOTIFICATION: ${JSON.stringify(notifyMessage)}`);
               } else if (message.SIN === 15) {
-                //TODO firmware locked?
+                context.log(`WARNING suspected firmware lock on 
+                  ${mobileMeta.mobileId}`);
+              } else if (message.SIN === 128) {
+                context.log(`Processing potential UAV POC data`);
+                let notifyMessage = uav.parseUav(message);
+                context.log(`UAV: ${JSON.stringify(notifyMessage)}`);
               } else {
-                context.log(`Parsing not defined for SIN=${message.SIN}`);
+              context.log(`Parsing not defined for SIN=${message.SIN}`);
               }
             } else {
               context.log(`Message ${message.ID} already in database`);
@@ -113,9 +128,9 @@ module.exports = async function (context, timer) {
 
   try {
     if (timer.IsPastDue) {
-      context.log('GetMobileOriginated timer past due!');
+      context.log(`${thisFunction.name} timer past due!`);
     }
-    context.log('GetMobileOriginated timer triggered at', callTime);
+    context.log(`${thisFunction.name} timer triggered at ${callTime}`);
   
     const mailboxes = await database.getMailboxes();
     for (let i = 0; i < mailboxes.length; i++) {
@@ -123,8 +138,20 @@ module.exports = async function (context, timer) {
       await getMessages(activeMailbox);
     }
   } catch (err) {
-    context.log(err);
-    throw err;
+    switch(err.message) {
+      case 'HTTP 502':
+        let newOutage = await database.updateApiAlive(apiOutageCatch, false);
+        if (newOutage) {
+          context.warn(`${thisFunction.name}: API server error for ${apiOutageCatch}`);
+          // TODO: notify
+        } else {
+          context.warn(`${thisFunction.name}: API still down at ${apiOutageCatch}`);
+        }
+        break;
+      default:
+        context.error(err);
+        throw err;
+    }
   } finally {
     await database.close();
   }

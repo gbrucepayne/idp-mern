@@ -2,11 +2,14 @@
 
 const idpApi = require('isatdatapro-api');
 //const idpApi = require('../../isatdatapro-api/lib/api-v1');
+const DataHandler = require('../database/dataHandler');
 
 module.exports = async function (context, timer) {
+  const thisFunction = {name: 'GetMobileTerminatedStatuses'};
   const callTime = new Date().toISOString();
-  const database = require('../database/database');
-  await database.initializeDatabase();
+  const database = new DataHandler();
+  await database.initialize();
+  let apiOutageCatch = '';
 
   /**
    * Retreives Mobile-Terminated statuses and updates a database
@@ -17,10 +20,12 @@ module.exports = async function (context, timer) {
     const nativeApiCall = 'get_forward_statuses';
     // TODO (Geoff) add function to idpApi to return the native Inmarsat call
     const idpGateway = await database.getMailboxGateway(mailbox);
+    apiOutageCatch = idpGateway;
     const auth = {
       accessId: mailbox.accessId,
       password: mailbox.password,
     };
+    context.debug(`Checking mailbox ${mailbox.accessId} open MT messages`);
     let filter = await database.getApiFilter(mailbox, nativeApiCall);
     if (filter.startTimeUtc) {
       if (typeof(filter.startTimeUtc) === 'string' || filter.startTimeUtc instanceof Date)
@@ -34,9 +39,14 @@ module.exports = async function (context, timer) {
       gatewayUrl: idpGateway,
       highWatermark: filter.startTimeUtc,
     };
-    context.log(`Getting status for messages ${JSON.stringify(filter)}`);
+    //context.log(`Getting status for messages ${JSON.stringify(filter)}`);
     await Promise.resolve(idpApi.getMobileTerminatedStatuses(auth, filter, idpGateway))
     .then(async function (result) {
+      let apiRecovered = await database.updateApiAlive(idpGateway, true);
+      if (apiRecovered) {
+        context.log(`${thisFunction.name}: API recovered for ${idpGateway}`);
+        // TODO notify recovery
+      }
       apiCallLog.errorId = result.ErrorID;
       if (result.ErrorID !== 0) {
         let errorDesc = await idpApi.getErrorName(result.ErrorID);
@@ -46,19 +56,37 @@ module.exports = async function (context, timer) {
       } else {
         apiCallLog.success = true;
         if (result.NextStartUTC !== '') {
-          apiCallLog.NextStartUTC = result.NextStartUTC;
+          apiCallLog.nextStartUtc = result.NextStartUTC;
+        } else {
+          apiCallLog.nextStartUtc = idpApi.dateToIdpTime(callTime);
         }
-        if (result.Statuses !== null) {
-          context.log(`Retrieved ${result.Statuses.length} statuses`);
+        if (result.Statuses !== null && result.Statuses.length > 0) {
+          context.log(`Retrieved ${result.Statuses.length} statuses for mailbox ${mailbox.accessId}`);
           apiCallLog.messageCount = result.Statuses.length;
           for (let s=0; s < result.Statuses.length; s++) {
             let status = result.Statuses[s];
-            //context.log(`Processing status for ${status.ForwardMessageID}`);
+            let inDb = await database.isMessageInDatabase(status);
+            if (!inDb) {
+              context.warn(`Mobile Terminated message ${status.ForwardMessageID} not found in database`);
+              //TODO if FowardID not in database, get Forward message (somebody else sent one)
+            }
             if (status.ErrorID !== 0) {
               status.errorDescription = await idpApi.getErrorName(status.ErrorID);
             }
             status.stateDesc = idpApi.getMtStateDef(status.State);
-            await database.updateMobileTerminatedMessages(status);
+            let newStatus = await database.updateMobileTerminatedMessages(status);
+            if (newStatus) {
+              //TODO get messageMeta, notify if relevant
+            }
+            // ***** UAV TESTING ONLY REMOVE ****************************************
+            let uavUpdate = await database.updateUavForwardMessages(status);
+            if (uavUpdate) {
+              if (status.State === 1) {
+                //TODO calculate latency
+              }
+              context.log(`Updated UAV forward message ${status.ForwardMessageID}`)
+            }
+            // **********************************************************************
           }
           // TODO: should be redundant if filtering on message ID
           if (result.More) {
@@ -81,34 +109,31 @@ module.exports = async function (context, timer) {
   }
 
   if (timer.IsPastDue) {
-    context.log('GetMobileTerminatedStatuses timer past due!');
+    context.log(`${thisFunction.name} timer past due!`);
   }
-  context.log('GetMobileTerminatedStatuses timer triggered at', callTime);
+  context.log(`${thisFunction.name} timer triggered at ${callTime}`);
   
   try {
     const mailboxes = await database.getMailboxes();
     for (let i = 0; i < mailboxes.length; i++) {
       let activeMailbox = mailboxes[i];
-      /*  TODO (Geoff) remove or create this as a filter option
-      let auth = {
-        accessId: activeMailbox.accessId,
-        password: activeMailbox.password
-      };
-      let filter = {};
-      filter.ids = await database
-        .getOpenMobileTerminatedIds(activeMailbox.accessId);
-      //TODO get statuses without filter to check if any messages submitted not in database
-      if (filter.ids.length > 0) {
-        await getStatuses(auth, filter);
-      } else {
-        context.log(`No open messages for mailbox ${auth.accessId}`);
-      }
-      */
       await getStatuses(activeMailbox);
     }
   } catch (err) {
-    context.log(err);
-    throw err;
+    switch(err.message) {
+      case 'HTTP 502':
+        let newOutage = await database.updateApiAlive(apiOutageCatch, false);
+        if (newOutage) {
+          context.warn(`${thisFunction.name}: API server error for ${apiOutageCatch}`);
+          // TODO: notify
+        } else {
+          context.warn(`${thisFunction.name}: API still down at ${apiOutageCatch}`);
+        }
+        break;
+      default:
+        context.error(err);
+        throw err;
+    }
   } finally {
     await database.close();
   }
