@@ -12,7 +12,12 @@ const db = mysql.createConnection({
   database: dbConfig.database,
 });
 */
-const db = require('../../database/database');
+const DbConnection = require('../../database/databaseConnector');
+const db = new DbConnection();
+
+(async function initializeDb() {
+  await db.initialize();
+})();
 // Variable to be sent to Frontend with Database status
 let databaseConnection = "Waiting for Database response...";
 
@@ -32,13 +37,22 @@ router.get('/mgs', function(req, res, next) {
   const mgsQuery = 'SELECT * FROM message_gateways';
   db.query(mgsQuery, (err, rows) => {
     if (err) {
-      res.send(err);
+      console.error(err);
+      res.json({"error": true});
     } else {
-      let gatewayList = 'Message Gateways:\n';
-      for (let r=0; r < rows.length; r++) {
-        gatewayList = gatewayList + rows[r].url + '\n';
-      }
-      res.send(gatewayList);
+      res.json(rows);
+    }
+  });
+});
+
+router.get('/uav', function(req, res, next) {
+  const uavQuery = 'SELECT * FROM uav_messages ORDER BY timestamp DESC LIMIT 500';
+  db.query(uavQuery, (err, rows) => {
+    if (err) {
+      console.error(err);
+      res.json({"error": true});
+    } else {
+      res.json(rows);
     }
   });
 });

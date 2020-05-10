@@ -54,7 +54,7 @@ DbConnection.prototype.initialize = async function() {
     }
   } else {
     await this.query(`USE ${dbConfig.database}`);
-    console.log(`Database ${dbConfig.database} exists`);
+    console.debug(`Using database ${dbConfig.database}`);
   }
 }
 

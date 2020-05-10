@@ -106,8 +106,8 @@ function convertFromColumnNames(itemBody, schema) {
  * Create item if it does not exist (noSQL concept)
  */
 async function createItem(db, itemBody) {
-  console.log(`createItem: ${JSON.stringify(itemBody)}`);
   let [table, schema] = getItemTable(itemBody);
+  console.log(`createItem in ${table}: ${JSON.stringify(itemBody)}`);
   let query = `INSERT INTO ${table} SET ?`;
   let newId = -1;
   try {
@@ -125,8 +125,8 @@ async function createItem(db, itemBody) {
  * Replace the item by ID.
  */
 async function replaceItem(db, itemBody) {
-  console.log(`replaceItem: ${JSON.stringify(itemBody)}`)
   let [table, schema] = getItemTable(itemBody);
+  console.log(`replaceItem in ${table}: ${JSON.stringify(itemBody)}`)
   let query = `UPDATE ${table} SET ? WHERE id = ?`;
   let changedRows = 0;
   try {
@@ -143,8 +143,8 @@ async function replaceItem(db, itemBody) {
  * Delete the item by ID.  TODO: broken
  */
 async function deleteItem(db, itemBody) {
-  console.log(`deleteItem ${JSON.stringify(itemBody)}`);
   let [table, schema] = getItemTable(itemBody);
+  console.log(`deleteItem from ${table}: ${JSON.stringify(itemBody)}`);
   let query = `DELETE FROM ${table} WHERE id = ?`;
   let affectedRows = 0;
   try {
@@ -457,6 +457,7 @@ async function updateUavReturnMessages(message) {
     await createItem(this.db, convertToColumnNames(dbEntry, schema));
     return true;
   } else {
+    console.warn(`Message ${message.messageId} already in database`);
     return false;
   }
 }

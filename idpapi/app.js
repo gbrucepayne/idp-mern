@@ -7,7 +7,7 @@ const timer = { IsPastDue: false };
 const MT_INTERVAL = 10 * 1000;
 ///*
 getMobileOriginated(console, timer);
-setInterval(function() {getMobileOriginated(console, timer)}, MO_INTERVAL);
+//setInterval(function() {getMobileOriginated(console, timer)}, MO_INTERVAL);
 // */
 /*
 setTimeout(function() {
